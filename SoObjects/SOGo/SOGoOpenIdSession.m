@@ -109,6 +109,7 @@ size_t curl_body_function(void *ptr, size_t size, size_t nmemb, void *buffer)
 {
   NSURL *url;
   NSMutableDictionary* trueHeaders;
+  NSUInteger* status;
   WORequest *request;
   WOResponse *response;
   WOHTTPConnection *httpConnection;
@@ -120,21 +121,22 @@ size_t curl_body_function(void *ptr, size_t size, size_t nmemb, void *buffer)
     httpConnection = [[WOHTTPConnection alloc] initWithURL: url];
     [httpConnection autorelease];
 
-    trueHeaders = [NSMutableDictionary dictionary];
-    [trueHeaders setObject: @"10.0.2.15:8080" forKey: @"host"];
-    // if(headers)
-    //   [trueHeaders addEntriesFromDictionary: headers];
-
     request = [[WORequest alloc] initWithMethod: method
                                             uri: [endpoint hostlessURL]
                                     httpVersion: @"HTTP/1.1"
-                                        headers: trueHeaders content: body
+                                        headers: headers content: body
                                         userInfo: nil];
     [request autorelease];
     [httpConnection sendRequest: request];
     response = [httpConnection readResponse];
-
-    return [response contentString];
+    status = [response status];
+    if(status >= 200 && status <400)
+      return [response contentString];
+    else
+    {
+      [self errorWithFormat: @"OpenID failed request to %@: %@", endpoint, response];
+      return nil;
+    }
   }
   else
   {
@@ -152,14 +154,12 @@ size_t curl_body_function(void *ptr, size_t size, size_t nmemb, void *buffer)
 
   result = [NSMutableDictionary dictionary];
 
-  // Prepare HTTPS post using libcurl
   location = [self->openIdUrl stringByAppendingString: @"/.well-known/openid-configuration"];
   [result setObject: location forKey: @"url"];
 
   url = [NSURL URLWithString: location];
   if (url)
   {
-      // Perform SOAP request
       content = [self _performOpenIdRequest: location
                         method: @"GET"
                        headers: nil
@@ -174,8 +174,8 @@ size_t curl_body_function(void *ptr, size_t size, size_t nmemb, void *buffer)
           self->endSessionEndpoint    = [config objectForKey: @"end_session_endpoint"];
           self->revocationEndpoint    = [config objectForKey: @"revocation_endpoint"];
       }
-        else
-          [result setObject: @"http-error" forKey: @"error"];
+      else
+        [result setObject: @"http-error" forKey: @"error"];
   }
   else
     [result setObject: @"invalid-url" forKey: @"error"];
@@ -232,86 +232,38 @@ size_t curl_body_function(void *ptr, size_t size, size_t nmemb, void *buffer)
 {
   NSString *location, *form, *content;
   NSMutableDictionary *result;
-  NSMutableData *buffer;
   NSDictionary *tokenRet;
   NSURL *url;
-  CURL *curl;
-
-  NSUInteger status;
-  char error[CURL_ERROR_SIZE];
-  CURLcode rc;
 
   result = [NSMutableDictionary dictionary];
 
   // Prepare HTTPS post using libcurl
   location = self->tokenEndpoint;
-  [result setObject: location forKey: @"url"];
-
   url = [NSURL URLWithString: location];
   if (url)
   {
-    curl_global_init(CURL_GLOBAL_SSL);
-    curl = curl_easy_init();
-    if (curl)
+    form = @"grant_type=authorization_code";
+    form = [form stringByAppendingFormat: @"&code=%@", code];
+    form = [form stringByAppendingFormat: @"&redirect_uri=%@", oldLocation];
+    form = [form stringByAppendingFormat: @"&client_id=%@", self->openIdClient];
+    form = [form stringByAppendingFormat: @"&client_secret=%@", self->openIdClientSecret];
+
+    content = [self _performOpenIdRequest: location
+                      method: @"GET"
+                      headers: nil
+                        body: [form dataUsingEncoding:NSUTF8StringEncoding]];
+    if (content)
     {
-      curl_easy_setopt(curl, CURLOPT_URL, [location UTF8String]);
-      curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-      curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-      curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
-      curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-      form = @"grant_type=authorization_code";
-      form = [form stringByAppendingFormat: @"&code=%@", code];
-      form = [form stringByAppendingFormat: @"&redirect_uri=%@", oldLocation];
-      form = [form stringByAppendingFormat: @"&client_id=%@", self->openIdClient];
-      form = [form stringByAppendingFormat: @"&client_secret=%@", self->openIdClientSecret];
-      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, [form UTF8String]);
-
-      /* buffering ivar, no need to retain/release */
-      buffer = [NSMutableData data];
-
-      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_body_function);
-      curl_easy_setopt(curl, CURLOPT_WRITEDATA, buffer);
-
-      error[0] = 0;
-      curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, &error);
-  
-      // Perform SOAP request
-      rc = curl_easy_perform(curl);
-      if (rc == CURLE_OK)
-      {
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-        [result setObject: [NSNumber numberWithUnsignedInt: status] forKey: @"status"];
-
-        if (status == 200)
-        {
-          content = [[NSString alloc] initWithData: buffer
-                                          encoding: NSUTF8StringEncoding];
-          if (!content)
-            content = [[NSString alloc] initWithData: buffer
-                                            encoding: NSISOLatin1StringEncoding];
-          tokenRet = [content objectFromJSONString];
-          self->accessToken = [tokenRet objectForKey: @"access_token"];
-          self->refreshToken = [tokenRet objectForKey: @"refresh_token"];
-          self->idToken = [tokenRet objectForKey: @"id_token"];
-          self->tokenType = [tokenRet objectForKey: @"token_type"];
-          [content autorelease];
-        }
-        else
-          [result setObject: @"http-error" forKey: @"error"];
-          content = [[NSString alloc] initWithData: buffer
-                                          encoding: NSUTF8StringEncoding];
-          if (!content)
-            content = [[NSString alloc] initWithData: buffer
-                                            encoding: NSISOLatin1StringEncoding];
-      }
-      else
-      {
-        [self errorWithFormat: @"CURL error while accessing %@ (%d): %@", location, rc,
-              [NSString stringWithCString: strlen(error) ? error : curl_easy_strerror(rc)]];
-        [result setObject: @"bad-url" forKey: @"error"];
-      }
-      curl_easy_cleanup (curl);
+        tokenRet = [content objectFromJSONString];
+        self->accessToken = [tokenRet objectForKey: @"access_token"];
+        self->refreshToken = [tokenRet objectForKey: @"refresh_token"];
+        self->idToken = [tokenRet objectForKey: @"id_token"];
+        self->tokenType = [tokenRet objectForKey: @"token_type"];
+        [content autorelease];
+    }
+    else
+    {
+        [result setObject: @"http-error" forKey: @"error"];
     }
   }
   else
