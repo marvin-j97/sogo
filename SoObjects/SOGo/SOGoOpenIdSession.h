@@ -62,6 +62,10 @@ size_t curl_body_function(void *ptr, size_t size, size_t nmemb, void *buffer);
 // + (SOGoOpenIdSession *) OpenIdSessionWithToken: (NSString *) token;
 
 - (void) initialize;
+- (NSString *) _performOpenIdRequest: (NSString *) endpoint
+                        method: (NSString *) method
+                       headers: (NSDictionary *) headers
+                          body: (NSData *) body;
 - (NSMutableDictionary *) fecthConfiguration;
 - (NSString*) getToken; 
 - (NSString *) loginUrl: (NSString *) oldLocation;
